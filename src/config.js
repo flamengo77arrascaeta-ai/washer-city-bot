@@ -42,7 +42,7 @@ function parseColor(hex) {
 const config = {
   token: required('DISCORD_TOKEN'),
   guildId: required('GUILD_ID'),
-  staffRoleId: required('STAFF_ROLE_ID'),
+  staffRoleId: optional('STAFF_ROLE_ID'),
   ticketCategoryId: required('TICKET_CATEGORY_ID'),
   logChannelId: required('LOG_CHANNEL_ID'),
   whitelistRoleId: optional('WHITELIST_ROLE_ID'),
