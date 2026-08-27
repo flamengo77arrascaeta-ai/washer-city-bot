@@ -23,11 +23,68 @@ jobs:
       - name: Install dependencies
         run: npm install --omit=dev --no-audit --no-fund
 
+      - name: Make optional settings non-fatal
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/config.js')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace("staffRoleId: required('STAFF_ROLE_ID'),", "staffRoleId: optional('STAFF_ROLE_ID'),")
+          s = s.replace("ticketCategoryId: required('TICKET_CATEGORY_ID'),", "ticketCategoryId: optional('TICKET_CATEGORY_ID'),")
+          s = s.replace("logChannelId: required('LOG_CHANNEL_ID'),", "logChannelId: optional('LOG_CHANNEL_ID'),")
+          p.write_text(s, encoding='utf-8')
+
+          p = Path('src/index.js')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace(
+              "|| member.roles?.cache?.has(config.staffRoleId);",
+              "|| (config.staffRoleId && member.roles?.cache?.has(config.staffRoleId));"
+          )
+          s = s.replace(
+              "async function sendLog(payload) {\n  const channel =",
+              "async function sendLog(payload) {\n  if (!config.logChannelId) return;\n  const channel ="
+          )
+          s = s.replace(
+              "ch => ch.parentId === config.ticketCategoryId\n      && ch.topic?.includes(`ticket-owner:${interaction.user.id}`)",
+              "ch => (!config.ticketCategoryId || ch.parentId === config.ticketCategoryId)\n      && ch.topic?.includes(`ticket-owner:${interaction.user.id}`)"
+          )
+          s = s.replace(
+              "parent: config.ticketCategoryId,",
+              "parent: config.ticketCategoryId || undefined,"
+          )
+          s = s.replace(
+              "id: config.staffRoleId,\n        allow:",
+              "id: config.staffRoleId || guild.ownerId,\n        allow:"
+          )
+          s = s.replace(
+              "`Aguarde a equipe <@&${config.staffRoleId}> responder.`",
+              "config.staffRoleId ? `Aguarde a equipe <@&${config.staffRoleId}> responder.` : 'Aguarde a equipe responder.'"
+          )
+          s = s.replace(
+              "content: `${interaction.user} <@&${config.staffRoleId}>`,",
+              "content: `${interaction.user}${config.staffRoleId ? ` <@&${config.staffRoleId}>` : ''}`,"
+          )
+          p.write_text(s, encoding='utf-8')
+          PY
+
       - name: Build standalone
         run: npx --yes @vercel/ncc build src/index.js -o dist
 
       - name: Validate bundle
-        run: node --check dist/index.js
+        run: |
+          node --check dist/index.js
+          if grep -q "staffRoleId: required('STAFF_ROLE_ID')" dist/index.js; then exit 1; fi
+          if grep -q "ticketCategoryId: required('TICKET_CATEGORY_ID')" dist/index.js; then exit 1; fi
+          if grep -q "logChannelId: required('LOG_CHANNEL_ID')" dist/index.js; then exit 1; fi
+
+      - name: Upload ready bot
+        uses: actions/upload-artifact@v4
+        with:
+          name: washer-bot-ready
+          path: dist/index.js
+          if-no-files-found: error
 
       - name: Commit standalone build
         run: |
