@@ -124301,8 +124301,8 @@ const config = {
   token: required('DISCORD_TOKEN'),
   guildId: required('GUILD_ID'),
   staffRoleId: optional('STAFF_ROLE_ID'),
-  ticketCategoryId: required('TICKET_CATEGORY_ID'),
-  logChannelId: required('LOG_CHANNEL_ID'),
+  ticketCategoryId: optional('TICKET_CATEGORY_ID'),
+  logChannelId: optional('LOG_CHANNEL_ID'),
   whitelistRoleId: optional('WHITELIST_ROLE_ID'),
 
   cityName: optional('CITY_NAME', 'WASHER GAMES'),
@@ -131386,7 +131386,7 @@ function isStaff(member) {
   if (!member) return false;
 
   return member.permissions?.has(PermissionFlagsBits.Administrator)
-    || member.roles?.cache?.has(config.staffRoleId);
+    || (config.staffRoleId && member.roles?.cache?.has(config.staffRoleId));
 }
 
 function addBrand(embed) {
@@ -131673,6 +131673,7 @@ function buildNickname({ id, name, releasedBy }) {
 }
 
 async function sendLog(payload) {
+  if (!config.logChannelId) return;
   const channel = await client.channels.fetch(config.logChannelId).catch(() => null);
   if (!channel?.isTextBased()) return;
   await channel.send(payload).catch(err => console.error('[LOG]', err));
@@ -131693,7 +131694,7 @@ async function openTicket(interaction, category, subject, description) {
   const guild = interaction.guild;
 
   const existing = guild.channels.cache.find(
-    ch => ch.parentId === config.ticketCategoryId
+    ch => (!config.ticketCategoryId || ch.parentId === config.ticketCategoryId)
       && ch.topic?.includes(`ticket-owner:${interaction.user.id}`)
   );
 
@@ -131708,7 +131709,7 @@ async function openTicket(interaction, category, subject, description) {
   const channel = await guild.channels.create({
     name: safeChannelName(`${category}-${interaction.user.username}`),
     type: ChannelType.GuildText,
-    parent: config.ticketCategoryId,
+    parent: config.ticketCategoryId || undefined,
     topic: `ticket-owner:${interaction.user.id};category:${category};claimed:none`,
     permissionOverwrites: [
       {
@@ -131725,7 +131726,7 @@ async function openTicket(interaction, category, subject, description) {
         ],
       },
       {
-        id: config.staffRoleId,
+        id: config.staffRoleId || guild.ownerId,
         allow: [
           PermissionsBitField.Flags.ViewChannel,
           PermissionsBitField.Flags.SendMessages,
@@ -131748,7 +131749,7 @@ async function openTicket(interaction, category, subject, description) {
           `**Assunto:** ${subject}`,
           `**Descrição:** ${description}`,
           '',
-          `Aguarde a equipe <@&${config.staffRoleId}> responder.`,
+          config.staffRoleId ? `Aguarde a equipe <@&${config.staffRoleId}> responder.` : 'Aguarde a equipe responder.',
         ].join('\n')
       )
       .setFooter({ text: `ID do usuário: ${interaction.user.id}` })
@@ -131769,7 +131770,7 @@ async function openTicket(interaction, category, subject, description) {
   );
 
   await channel.send({
-    content: `${interaction.user} <@&${config.staffRoleId}>`,
+    content: `${interaction.user}${config.staffRoleId ? ` <@&${config.staffRoleId}>` : ''}`,
     embeds: [embed],
     components: [controls],
   });
