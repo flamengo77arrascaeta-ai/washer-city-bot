@@ -35,26 +35,42 @@ function identifier(name, fallback) {
 
 function parseColor(hex) {
   const clean = String(hex).replace('#', '');
-  if (!/^[0-9A-Fa-f]{6}$/.test(clean)) return 0xD9D9D9;
+  if (!/^[0-9A-Fa-f]{6}$/.test(clean)) return 0x18A86B;
   return parseInt(clean, 16);
 }
 
 const config = {
   token: required('DISCORD_TOKEN'),
-  guildId: required('GUILD_ID'),
+
+  guildId: optional('GUILD_ID', '1542303858695610438'),
   staffRoleId: optional('STAFF_ROLE_ID'),
-  ticketCategoryId: required('TICKET_CATEGORY_ID'),
-  logChannelId: required('LOG_CHANNEL_ID'),
-  whitelistRoleId: optional('WHITELIST_ROLE_ID'),
+  ticketCategoryId: optional('TICKET_CATEGORY_ID', '1542323499186782249'),
+  logChannelId: optional('LOG_CHANNEL_ID', '1542323670859649095'),
+  whitelistRoleId: optional('WHITELIST_ROLE_ID', '1542305754806223040'),
 
   cityName: optional('CITY_NAME', 'WASHER GAMES'),
-  fivemConnect: optional('FIVEM_CONNECT', 'connect 127.0.0.1:30120'),
-  fivemJoinUrl: optional('FIVEM_JOIN_URL'),
-  fivemStatusUrl: optional('FIVEM_STATUS_URL'),
-  embedColor: parseColor(optional('EMBED_COLOR', 'D9D9D9')),
-  panelBannerUrl: optional('PANEL_BANNER_URL'),
-  ticketBannerUrl: optional('TICKET_BANNER_URL'),
+  fivemConnect: optional('FIVEM_CONNECT', 'connect node12.zampto.net:31969'),
+  fivemStatusUrl: optional('FIVEM_STATUS_URL', 'http://node12.zampto.net:31969'),
+  rulesUrl: optional('RULES_URL'),
+
+  embedColor: parseColor(optional('EMBED_COLOR', '18A86B')),
   logoUrl: optional('LOGO_URL'),
+
+  connectTitle: optional('CONNECT_TITLE', 'WASHER GAMES'),
+  connectBannerUrl: optional('CONNECT_BANNER_URL'),
+  connectThumbUrl: optional('CONNECT_THUMB_URL'),
+
+  ticketTitle: optional('TICKET_TITLE', '🎟️ Sistema Automático de Tickets'),
+  ticketDescription: optional(
+    'TICKET_DESCRIPTION',
+    'Para receber **SUPORTE**, abra um ticket selecionando uma opção no menu abaixo.\n\n❗ Abra tickets apenas quando necessário.'
+  ),
+  ticketBannerUrl: optional('TICKET_BANNER_URL'),
+  ticketThumbUrl: optional('TICKET_THUMB_URL'),
+
+  whitelistTitle: optional('WHITELIST_TITLE', 'Sistema de liberação do servidor'),
+  whitelistBannerUrl: optional('WHITELIST_BANNER_URL'),
+  whitelistThumbUrl: optional('WHITELIST_THUMB_URL'),
 
   setNicknameAfterWhitelist: bool('SET_NICKNAME_AFTER_WHITELIST', true),
   nicknameFormat: process.env.NICKNAME_FORMAT || '#{id}/{liberado_por}/ | {nome}',
@@ -62,11 +78,11 @@ const config = {
 
   dbEnabled: bool('DB_ENABLED', true),
   db: {
-    host: optional('DB_HOST', '127.0.0.1'),
+    host: optional('DB_HOST', 'node12.zampto.net'),
     port: integer('DB_PORT', 3306),
-    user: optional('DB_USER', 'root'),
+    user: optional('DB_USER', '19640_washer'),
     password: process.env.DB_PASSWORD || '',
-    database: optional('DB_NAME', 'database'),
+    database: optional('DB_NAME', '19640_creative'),
   },
 
   whitelist: {
