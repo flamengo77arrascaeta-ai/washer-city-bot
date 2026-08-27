@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const {
   Client,
   GatewayIntentBits,
@@ -18,6 +20,8 @@ const {
   TextInputStyle,
   ChannelType,
   AttachmentBuilder,
+  Events,
+  MessageFlags,
 } = require('discord.js');
 
 const config = require('./config');
@@ -42,26 +46,37 @@ const client = new Client({
 process.on('unhandledRejection', err => console.error('[UNHANDLED]', err));
 process.on('uncaughtException', err => console.error('[UNCAUGHT]', err));
 
+const STATE_FILE = path.join(process.cwd(), 'washer-panel-state.json');
+let panelState = loadPanelState();
+
+function loadPanelState() {
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function savePanelState() {
+  try {
+    fs.writeFileSync(STATE_FILE, JSON.stringify(panelState, null, 2), 'utf8');
+  } catch (error) {
+    console.error('[PAINEL] Não foi possível salvar estado:', error.message);
+  }
+}
+
 const commands = [
   new SlashCommandBuilder()
-    .setName('painel')
-    .setDescription('Envia o painel principal da cidade.'),
-
-  new SlashCommandBuilder()
     .setName('connect')
-    .setDescription('Mostra o connect da cidade.'),
-
-  new SlashCommandBuilder()
-    .setName('status')
-    .setDescription('Mostra o status atual da cidade.'),
+    .setDescription('Envia o painel público de Connect + Status.'),
 
   new SlashCommandBuilder()
     .setName('ticket')
-    .setDescription('Abre o menu para criar um ticket.'),
+    .setDescription('Envia o painel público de tickets.'),
 
   new SlashCommandBuilder()
     .setName('liberarid')
-    .setDescription('Libera seu ID/whitelist automaticamente.'),
+    .setDescription('Envia o painel público para liberar ID.'),
 
   new SlashCommandBuilder()
     .setName('idinfo')
@@ -89,168 +104,118 @@ const commands = [
 
 function isStaff(member) {
   if (!member) return false;
-
-  return member.permissions?.has(PermissionFlagsBits.Administrator)
-    || member.roles?.cache?.has(config.staffRoleId);
+  return Boolean(
+    member.permissions?.has(PermissionFlagsBits.Administrator) ||
+    (config.staffRoleId && member.roles?.cache?.has(config.staffRoleId))
+  );
 }
 
-function addBrand(embed) {
-  if (config.logoUrl) embed.setThumbnail(config.logoUrl);
+function brandThumb() {
+  return config.logoUrl || client.user?.displayAvatarURL({ size: 256 }) || null;
+}
+
+function applyVisuals(embed, { thumb, banner } = {}) {
+  const thumbUrl = thumb || brandThumb();
+  if (thumbUrl) embed.setThumbnail(thumbUrl);
+  if (banner) embed.setImage(banner);
   return embed;
 }
 
-function panelEmbed() {
-  const embed = addBrand(
-    new EmbedBuilder()
-      .setColor(config.embedColor)
-      .setTitle(`🏙️ ${config.cityName}`)
-      .setDescription(
-        [
-          '**Bem-vindo ao painel oficial da cidade.**',
-          '',
-          'Use os botões abaixo para conectar, consultar o status, abrir suporte ou liberar seu ID.',
-          '',
-          '🎮 **Connect** — entre na cidade',
-          '📡 **Status** — veja players/servidor',
-          '🎫 **Ticket** — atendimento privado',
-          '✅ **Liberar ID** — whitelist automática',
-        ].join('\n')
-      )
-      .setFooter({ text: `${config.cityName} • Sistema automático` })
-      .setTimestamp()
-  );
-
-  if (config.panelBannerUrl) embed.setImage(config.panelBannerUrl);
-  return embed;
+function nowBrazil() {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(new Date());
 }
 
-function panelRows() {
-  const row = new ActionRowBuilder();
-
-  if (config.fivemJoinUrl) {
-    row.addComponents(
-      new ButtonBuilder()
-        .setLabel('Conectar')
-        .setEmoji('🎮')
-        .setStyle(ButtonStyle.Link)
-        .setURL(config.fivemJoinUrl)
-    );
-  } else {
-    row.addComponents(
-      new ButtonBuilder()
-        .setCustomId('panel_connect')
-        .setLabel('Conectar')
-        .setEmoji('🎮')
-        .setStyle(ButtonStyle.Primary)
-    );
-  }
-
-  row.addComponents(
-    new ButtonBuilder()
-      .setCustomId('panel_status')
-      .setLabel('Status')
-      .setEmoji('📡')
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId('panel_ticket')
-      .setLabel('Ticket')
-      .setEmoji('🎫')
-      .setStyle(ButtonStyle.Secondary),
-
-    new ButtonBuilder()
-      .setCustomId('panel_whitelist')
-      .setLabel('Liberar ID')
-      .setEmoji('✅')
-      .setStyle(ButtonStyle.Success)
-  );
-
-  return [row];
-}
-
-function connectEmbed() {
-  return addBrand(
-    new EmbedBuilder()
-      .setColor(config.embedColor)
-      .setTitle(`🎮 Connect • ${config.cityName}`)
-      .setDescription(
-        [
-          'Copie o comando abaixo, abra o **F8** no FiveM e cole:',
-          '',
-          `\`\`\`${config.fivemConnect}\`\`\``,
-        ].join('\n')
-      )
-      .setFooter({ text: `${config.cityName} • Bom RP!` })
-  );
-}
-
-async function statusEmbed() {
+async function buildConnectPanel() {
   const status = await getServerStatus();
+  const online = status.online === true;
 
-  if (status.online === null) {
-    return addBrand(
-      new EmbedBuilder()
-        .setColor(config.embedColor)
-        .setTitle(`📡 Status • ${config.cityName}`)
-        .setDescription('O monitoramento de status ainda não foi configurado no `.env`.')
-    );
-  }
+  const embed = new EmbedBuilder()
+    .setColor(online ? 0x2ECC71 : 0xE74C3C)
+    .setTitle(config.connectTitle)
+    .addFields(
+      {
+        name: '▏ Status:',
+        value: online ? '🟢 `ONLINE`' : '🔴 `OFFLINE`',
+        inline: true,
+      },
+      {
+        name: '▏ Jogadores:',
+        value: online
+          ? `\`[ ${status.players ?? 0}/${status.maxPlayers ?? '?'} ]\``
+          : '`[ 0/? ]`',
+        inline: true,
+      },
+      {
+        name: '▏ IP FiveM:',
+        value: `\`\`\`${config.fivemConnect}\`\`\``,
+        inline: false,
+      }
+    )
+    .setFooter({
+      text: `📊 Atualizado a cada 2 minutos | Última atualização: ${nowBrazil()}`,
+    });
 
-  if (!status.online) {
-    return addBrand(
-      new EmbedBuilder()
-        .setColor(config.embedColor)
-        .setTitle(`🔴 ${config.cityName} está offline`)
-        .setDescription('Não foi possível acessar o status do FXServer agora.')
-        .setTimestamp()
-    );
-  }
+  applyVisuals(embed, {
+    thumb: config.connectThumbUrl,
+    banner: config.connectBannerUrl,
+  });
 
-  return addBrand(
-    new EmbedBuilder()
-      .setColor(config.embedColor)
-      .setTitle(`🟢 ${config.cityName} está online`)
-      .addFields(
-        { name: 'Players', value: `**${status.players ?? 0}/${status.maxPlayers ?? '?'}**`, inline: true },
-        { name: 'Servidor', value: status.hostname || config.cityName, inline: true }
-      )
-      .setTimestamp()
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('connect_copy')
+      .setLabel('Conectar')
+      .setEmoji('🔗')
+      .setStyle(ButtonStyle.Secondary)
   );
+
+  if (config.rulesUrl) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setLabel('Regras')
+        .setEmoji('📚')
+        .setStyle(ButtonStyle.Link)
+        .setURL(config.rulesUrl)
+    );
+  }
+
+  return { embeds: [embed], components: [row] };
 }
 
-function ticketMenu() {
-  const embed = addBrand(
-    new EmbedBuilder()
-      .setColor(config.embedColor)
-      .setTitle(`🎫 Central de Atendimento • ${config.cityName}`)
-      .setDescription(
-        [
-          'Escolha abaixo o motivo do seu atendimento.',
-          '',
-          'Você só pode ter **1 ticket aberto por vez**.',
-        ].join('\n')
-      )
-  );
+function buildTicketPanel() {
+  const embed = new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setTitle(config.ticketTitle)
+    .setDescription(config.ticketDescription)
+    .setFooter({ text: `${config.cityName} • Atendimento` });
 
-  if (config.ticketBannerUrl) embed.setImage(config.ticketBannerUrl);
+  applyVisuals(embed, {
+    thumb: config.ticketThumbUrl,
+    banner: config.ticketBannerUrl,
+  });
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId('ticket_category')
-    .setPlaceholder('Selecione o tipo do ticket...')
+    .setPlaceholder('➡️ Clique aqui para selecionar...')
     .addOptions(
       new StringSelectMenuOptionBuilder()
         .setLabel('Suporte')
-        .setDescription('Ajuda com problemas gerais.')
+        .setDescription('Problemas gerais, bugs e ajuda.')
         .setEmoji('🛠️')
         .setValue('suporte'),
       new StringSelectMenuOptionBuilder()
         .setLabel('Denúncia')
-        .setDescription('Denuncie player ou situação.')
+        .setDescription('Denúncia de player ou situação.')
         .setEmoji('🚨')
         .setValue('denuncia'),
       new StringSelectMenuOptionBuilder()
         .setLabel('Compras / Loja')
-        .setDescription('Assuntos sobre compras e benefícios.')
+        .setDescription('Dúvidas sobre compras e benefícios.')
         .setEmoji('🛒')
         .setValue('compras'),
       new StringSelectMenuOptionBuilder()
@@ -260,7 +225,7 @@ function ticketMenu() {
         .setValue('parceria'),
       new StringSelectMenuOptionBuilder()
         .setLabel('Outro')
-        .setDescription('Outro assunto.')
+        .setDescription('Qualquer outro assunto.')
         .setEmoji('📌')
         .setValue('outro')
     );
@@ -269,6 +234,39 @@ function ticketMenu() {
     embeds: [embed],
     components: [new ActionRowBuilder().addComponents(menu)],
   };
+}
+
+function buildWhitelistPanel() {
+  const embed = new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setTitle(config.whitelistTitle)
+    .setDescription(
+      [
+        '**Siga os passos abaixo para completar o processo de liberação de acesso:**',
+        '',
+        `• Conecte-se ao servidor pelo FiveM usando: \`${config.fivemConnect}\``,
+        '• Pegue o **ID** exibido dentro da cidade.',
+        '• Clique em **Liberar Acesso** e informe seu ID e nome.',
+        '',
+        'Após a liberação o bot atualiza sua whitelist, cargo e nickname automaticamente.',
+      ].join('\n')
+    )
+    .setFooter({ text: `${config.cityName} • Liberação automática` });
+
+  applyVisuals(embed, {
+    thumb: config.whitelistThumbUrl,
+    banner: config.whitelistBannerUrl,
+  });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('whitelist_open')
+      .setLabel('Liberar Acesso')
+      .setEmoji('✅')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  return { embeds: [embed], components: [row] };
 }
 
 function whitelistModal() {
@@ -286,7 +284,7 @@ function whitelistModal() {
 
   const name = new TextInputBuilder()
     .setCustomId('rp_name')
-    .setLabel('Seu nome')
+    .setLabel('Seu nome na cidade')
     .setPlaceholder('Ex.: João Silva')
     .setStyle(TextInputStyle.Short)
     .setRequired(true)
@@ -378,9 +376,10 @@ function buildNickname({ id, name, releasedBy }) {
 }
 
 async function sendLog(payload) {
+  if (!config.logChannelId) return;
   const channel = await client.channels.fetch(config.logChannelId).catch(() => null);
   if (!channel?.isTextBased()) return;
-  await channel.send(payload).catch(err => console.error('[LOG]', err));
+  await channel.send(payload).catch(err => console.error('[LOG]', err.message));
 }
 
 async function registerCommands() {
@@ -394,71 +393,108 @@ async function registerCommands() {
   console.log(`[DISCORD] ${commands.length} comandos sincronizados.`);
 }
 
+async function postConnectPanel(channel) {
+  const message = await channel.send(await buildConnectPanel());
+  panelState.connect = {
+    channelId: channel.id,
+    messageId: message.id,
+  };
+  savePanelState();
+  return message;
+}
+
+async function refreshConnectPanel() {
+  const saved = panelState.connect;
+  if (!saved?.channelId || !saved?.messageId) return;
+
+  const channel = await client.channels.fetch(saved.channelId).catch(() => null);
+  if (!channel?.isTextBased()) return;
+
+  const message = await channel.messages.fetch(saved.messageId).catch(() => null);
+  if (!message) {
+    delete panelState.connect;
+    savePanelState();
+    return;
+  }
+
+  await message.edit(await buildConnectPanel()).catch(error => {
+    console.error('[STATUS] Falha ao atualizar painel:', error.message);
+  });
+}
+
 async function openTicket(interaction, category, subject, description) {
   const guild = interaction.guild;
 
   const existing = guild.channels.cache.find(
-    ch => ch.parentId === config.ticketCategoryId
-      && ch.topic?.includes(`ticket-owner:${interaction.user.id}`)
+    ch =>
+      ch.topic?.includes(`ticket-owner:${interaction.user.id}`) &&
+      (!config.ticketCategoryId || ch.parentId === config.ticketCategoryId)
   );
 
   if (existing) {
     await interaction.reply({
       content: `❌ Você já possui um ticket aberto: ${existing}`,
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
     return;
+  }
+
+  const permissionOverwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionsBitField.Flags.ViewChannel],
+    },
+    {
+      id: interaction.user.id,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles,
+      ],
+    },
+  ];
+
+  if (config.staffRoleId) {
+    permissionOverwrites.push({
+      id: config.staffRoleId,
+      allow: [
+        PermissionsBitField.Flags.ViewChannel,
+        PermissionsBitField.Flags.SendMessages,
+        PermissionsBitField.Flags.ReadMessageHistory,
+        PermissionsBitField.Flags.AttachFiles,
+        PermissionsBitField.Flags.ManageMessages,
+      ],
+    });
   }
 
   const channel = await guild.channels.create({
     name: safeChannelName(`${category}-${interaction.user.username}`),
     type: ChannelType.GuildText,
-    parent: config.ticketCategoryId,
+    parent: config.ticketCategoryId || undefined,
     topic: `ticket-owner:${interaction.user.id};category:${category};claimed:none`,
-    permissionOverwrites: [
-      {
-        id: guild.roles.everyone.id,
-        deny: [PermissionsBitField.Flags.ViewChannel],
-      },
-      {
-        id: interaction.user.id,
-        allow: [
-          PermissionsBitField.Flags.ViewChannel,
-          PermissionsBitField.Flags.SendMessages,
-          PermissionsBitField.Flags.ReadMessageHistory,
-          PermissionsBitField.Flags.AttachFiles,
-        ],
-      },
-      {
-        id: config.staffRoleId,
-        allow: [
-          PermissionsBitField.Flags.ViewChannel,
-          PermissionsBitField.Flags.SendMessages,
-          PermissionsBitField.Flags.ReadMessageHistory,
-          PermissionsBitField.Flags.AttachFiles,
-          PermissionsBitField.Flags.ManageMessages,
-        ],
-      },
-    ],
+    permissionOverwrites,
   });
 
-  const embed = addBrand(
-    new EmbedBuilder()
-      .setColor(config.embedColor)
-      .setTitle(`🎫 Ticket • ${category.toUpperCase()}`)
-      .setDescription(
-        [
-          `${interaction.user}, seu atendimento foi criado.`,
-          '',
-          `**Assunto:** ${subject}`,
-          `**Descrição:** ${description}`,
-          '',
-          `Aguarde a equipe <@&${config.staffRoleId}> responder.`,
-        ].join('\n')
-      )
-      .setFooter({ text: `ID do usuário: ${interaction.user.id}` })
-      .setTimestamp()
-  );
+  const embed = new EmbedBuilder()
+    .setColor(config.embedColor)
+    .setTitle(`🎫 Ticket • ${category.toUpperCase()}`)
+    .setDescription(
+      [
+        `${interaction.user}, seu atendimento foi criado.`,
+        '',
+        `**Assunto:** ${subject}`,
+        `**Descrição:** ${description}`,
+        '',
+        config.staffRoleId
+          ? `Aguarde a equipe <@&${config.staffRoleId}> responder.`
+          : 'Aguarde a equipe responder.',
+      ].join('\n')
+    )
+    .setFooter({ text: `ID do usuário: ${interaction.user.id}` })
+    .setTimestamp();
+
+  applyVisuals(embed, { thumb: config.ticketThumbUrl });
 
   const controls = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -474,14 +510,16 @@ async function openTicket(interaction, category, subject, description) {
   );
 
   await channel.send({
-    content: `${interaction.user} <@&${config.staffRoleId}>`,
+    content: config.staffRoleId
+      ? `${interaction.user} <@&${config.staffRoleId}>`
+      : `${interaction.user}`,
     embeds: [embed],
     components: [controls],
   });
 
   await interaction.reply({
     content: `✅ Ticket criado: ${channel}`,
-    ephemeral: true,
+    flags: MessageFlags.Ephemeral,
   });
 
   await sendLog({
@@ -493,7 +531,7 @@ async function openTicket(interaction, category, subject, description) {
           { name: 'Usuário', value: `${interaction.user} (${interaction.user.id})` },
           { name: 'Categoria', value: category, inline: true },
           { name: 'Canal', value: `${channel}`, inline: true },
-          { name: 'Assunto', value: subject },
+          { name: 'Assunto', value: subject }
         )
         .setTimestamp(),
     ],
@@ -504,7 +542,10 @@ async function closeTicket(interaction, reason) {
   const channel = interaction.channel;
 
   if (!channel?.topic?.includes('ticket-owner:')) {
-    await interaction.reply({ content: '❌ Este canal não é um ticket.', ephemeral: true });
+    await interaction.reply({
+      content: '❌ Este canal não é um ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
@@ -512,11 +553,14 @@ async function closeTicket(interaction, reason) {
   const allowed = isStaff(interaction.member) || interaction.user.id === ownerId;
 
   if (!allowed) {
-    await interaction.reply({ content: '❌ Você não pode fechar este ticket.', ephemeral: true });
+    await interaction.reply({
+      content: '❌ Você não pode fechar este ticket.',
+      flags: MessageFlags.Ephemeral,
+    });
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
   let transcript;
   try {
@@ -551,84 +595,73 @@ async function closeTicket(interaction, reason) {
   }, 2500);
 }
 
-client.once('ready', async () => {
+client.once(Events.ClientReady, async () => {
   console.log(`[DISCORD] Logado como ${client.user.tag}`);
 
   try {
     await initDb();
   } catch (error) {
-    console.error('[DB] Falha ao conectar:', error.message);
+    console.error('[DB] Banco indisponível no início:', error.message);
   }
 
   try {
     await registerCommands();
   } catch (error) {
-    console.error('[DISCORD] Falha ao registrar comandos:', error);
+    console.error('[DISCORD] Falha ao registrar comandos:', error.message);
   }
 
-  client.user.setActivity(`${config.cityName} • /painel`);
+  client.user.setActivity(`${config.cityName} • Connect / Ticket / ID`);
+
+  await refreshConnectPanel();
+  setInterval(refreshConnectPanel, 120000);
 });
 
-client.on('interactionCreate', async interaction => {
+client.on(Events.InteractionCreate, async interaction => {
   try {
-    // ================= SLASH COMMANDS =================
-
     if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === 'painel') {
+      if (['connect', 'ticket', 'liberarid'].includes(interaction.commandName)) {
         if (!isStaff(interaction.member)) {
-          await interaction.reply({ content: '❌ Apenas a staff pode enviar o painel.', ephemeral: true });
+          await interaction.reply({
+            content: '❌ Apenas a staff pode publicar os painéis.',
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
-        await interaction.channel.send({
-          embeds: [panelEmbed()],
-          components: panelRows(),
-        });
+        if (interaction.commandName === 'connect') {
+          await postConnectPanel(interaction.channel);
+          await interaction.reply({
+            content: '✅ Painel **Connect + Status** enviado e atualização automática ativada.',
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
 
-        await interaction.reply({ content: '✅ Painel enviado.', ephemeral: true });
-        return;
-      }
+        if (interaction.commandName === 'ticket') {
+          await interaction.channel.send(buildTicketPanel());
+          await interaction.reply({
+            content: '✅ Painel de **Tickets** enviado.',
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
 
-      if (interaction.commandName === 'connect') {
-        const components = config.fivemJoinUrl
-          ? [
-              new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                  .setLabel('Entrar na cidade')
-                  .setEmoji('🎮')
-                  .setStyle(ButtonStyle.Link)
-                  .setURL(config.fivemJoinUrl)
-              ),
-            ]
-          : [];
-
-        await interaction.reply({
-          embeds: [connectEmbed()],
-          components,
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (interaction.commandName === 'status') {
-        await interaction.deferReply({ ephemeral: true });
-        await interaction.editReply({ embeds: [await statusEmbed()] });
-        return;
-      }
-
-      if (interaction.commandName === 'ticket') {
-        await interaction.reply({ ...ticketMenu(), ephemeral: true });
-        return;
-      }
-
-      if (interaction.commandName === 'liberarid') {
-        await interaction.showModal(whitelistModal());
-        return;
+        if (interaction.commandName === 'liberarid') {
+          await interaction.channel.send(buildWhitelistPanel());
+          await interaction.reply({
+            content: '✅ Painel de **Liberar ID** enviado.',
+            flags: MessageFlags.Ephemeral,
+          });
+          return;
+        }
       }
 
       if (interaction.commandName === 'idinfo') {
         if (!isStaff(interaction.member)) {
-          await interaction.reply({ content: '❌ Apenas a staff pode usar este comando.', ephemeral: true });
+          await interaction.reply({
+            content: '❌ Apenas a staff pode usar este comando.',
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
@@ -636,7 +669,10 @@ client.on('interactionCreate', async interaction => {
         const claim = await getClaimByDiscord(user.id);
 
         if (!claim) {
-          await interaction.reply({ content: 'ℹ️ Esse usuário não possui ID vinculado pelo bot.', ephemeral: true });
+          await interaction.reply({
+            content: 'ℹ️ Esse usuário não possui ID vinculado pelo bot.',
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
@@ -653,20 +689,22 @@ client.on('interactionCreate', async interaction => {
               )
               .setTimestamp(new Date(claim.created_at)),
           ],
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
 
       if (interaction.commandName === 'desvincularid') {
         if (!isStaff(interaction.member)) {
-          await interaction.reply({ content: '❌ Apenas a staff pode usar este comando.', ephemeral: true });
+          await interaction.reply({
+            content: '❌ Apenas a staff pode usar este comando.',
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
         const user = interaction.options.getUser('usuario', true);
         const revert = interaction.options.getBoolean('remover_whitelist') || false;
-
         const claim = await unlinkWhitelist(user.id, revert);
 
         const member = await interaction.guild.members.fetch(user.id).catch(() => null);
@@ -676,54 +714,32 @@ client.on('interactionCreate', async interaction => {
 
         await interaction.reply({
           content: `✅ ${user} foi desvinculado do ID **${claim.fivem_id}**${revert ? ' e teve a whitelist removida da base' : ''}.`,
-          ephemeral: true,
-        });
-
-        await sendLog({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(config.embedColor)
-              .setTitle('🧹 ID desvinculado')
-              .addFields(
-                { name: 'Usuário', value: `${user} (${user.id})` },
-                { name: 'ID', value: String(claim.fivem_id), inline: true },
-                { name: 'Por', value: `${interaction.user} (${interaction.user.id})`, inline: true },
-                { name: 'Whitelist zerada?', value: revert ? 'Sim' : 'Não', inline: true }
-              )
-              .setTimestamp(),
-          ],
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
     }
 
-    // ================= BOTÕES =================
-
     if (interaction.isButton()) {
-      if (interaction.customId === 'panel_connect') {
-        await interaction.reply({ embeds: [connectEmbed()], ephemeral: true });
+      if (interaction.customId === 'connect_copy') {
+        await interaction.reply({
+          content: `Abra o **F8** no FiveM e cole:\n\`\`\`${config.fivemConnect}\`\`\``,
+          flags: MessageFlags.Ephemeral,
+        });
         return;
       }
 
-      if (interaction.customId === 'panel_status') {
-        await interaction.deferReply({ ephemeral: true });
-        await interaction.editReply({ embeds: [await statusEmbed()] });
-        return;
-      }
-
-      if (interaction.customId === 'panel_ticket') {
-        await interaction.reply({ ...ticketMenu(), ephemeral: true });
-        return;
-      }
-
-      if (interaction.customId === 'panel_whitelist') {
+      if (interaction.customId === 'whitelist_open') {
         await interaction.showModal(whitelistModal());
         return;
       }
 
       if (interaction.customId === 'ticket_claim') {
         if (!isStaff(interaction.member)) {
-          await interaction.reply({ content: '❌ Apenas a staff pode assumir tickets.', ephemeral: true });
+          await interaction.reply({
+            content: '❌ Apenas a staff pode assumir tickets.',
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
@@ -731,7 +747,10 @@ client.on('interactionCreate', async interaction => {
         const claimed = oldTopic.match(/claimed:(\d+)/)?.[1];
 
         if (claimed) {
-          await interaction.reply({ content: `ℹ️ Este ticket já foi assumido por <@${claimed}>.`, ephemeral: true });
+          await interaction.reply({
+            content: `ℹ️ Este ticket já foi assumido por <@${claimed}>.`,
+            flags: MessageFlags.Ephemeral,
+          });
           return;
         }
 
@@ -755,22 +774,16 @@ client.on('interactionCreate', async interaction => {
       }
     }
 
-    // ================= SELECT MENU =================
-
     if (interaction.isStringSelectMenu() && interaction.customId === 'ticket_category') {
-      const category = interaction.values[0];
-      await interaction.showModal(ticketModal(category));
+      await interaction.showModal(ticketModal(interaction.values[0]));
       return;
     }
-
-    // ================= MODALS =================
 
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith('ticket_modal:')) {
         const category = interaction.customId.split(':')[1];
         const subject = interaction.fields.getTextInputValue('ticket_subject');
         const description = interaction.fields.getTextInputValue('ticket_description');
-
         await openTicket(interaction, category, subject, description);
         return;
       }
@@ -782,7 +795,7 @@ client.on('interactionCreate', async interaction => {
       }
 
       if (interaction.customId === 'whitelist_modal') {
-        await interaction.deferReply({ ephemeral: true });
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
         const fivemId = interaction.fields.getTextInputValue('fivem_id').trim();
         const rpName = interaction.fields.getTextInputValue('rp_name').trim();
@@ -797,14 +810,17 @@ client.on('interactionCreate', async interaction => {
 
         const member = await interaction.guild.members.fetch(interaction.user.id);
 
+        let roleResult = 'Não configurado';
         if (config.whitelistRoleId) {
-          await member.roles.add(config.whitelistRoleId).catch(err => {
-            console.error('[WHITELIST] Não consegui dar o cargo:', err.message);
-          });
+          try {
+            await member.roles.add(config.whitelistRoleId, 'Whitelist automática');
+            roleResult = 'Aplicado';
+          } catch (error) {
+            roleResult = `Não aplicado: ${error.message}`;
+          }
         }
 
         let nickResult = 'Não alterado';
-
         if (config.setNicknameAfterWhitelist) {
           const nickname = buildNickname({
             id: claim.id,
@@ -816,31 +832,31 @@ client.on('interactionCreate', async interaction => {
             await member.setNickname(nickname, 'Whitelist automática');
             nickResult = nickname;
           } catch (error) {
-            nickResult = `Falhou: ${error.message}`;
+            nickResult = `Não alterado: ${error.message}`;
           }
         }
 
-        await interaction.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(config.embedColor)
-              .setTitle('✅ ID liberado com sucesso')
-              .setDescription('Sua whitelist foi atualizada automaticamente.')
-              .addFields(
-                { name: 'ID', value: `**${claim.id}**`, inline: true },
-                { name: 'Nome', value: `**${claim.name}**`, inline: true },
-                { name: 'Liberado por', value: `**${releasedBy}**`, inline: true },
-                { name: 'Nick', value: `\`${nickResult}\`` }
-              )
-              .setFooter({ text: `${config.cityName} • Liberação automática` })
-              .setTimestamp(),
-          ],
-        });
+        const success = new EmbedBuilder()
+          .setColor(0x2ECC71)
+          .setTitle('✅ ID liberado com sucesso')
+          .setDescription('Sua whitelist foi atualizada automaticamente.')
+          .addFields(
+            { name: 'ID', value: `**${claim.id}**`, inline: true },
+            { name: 'Nome', value: `**${claim.name}**`, inline: true },
+            { name: 'Cargo', value: roleResult, inline: true },
+            { name: 'Nickname', value: `\`${nickResult}\`` }
+          )
+          .setFooter({ text: `${config.cityName} • Liberação automática` })
+          .setTimestamp();
+
+        applyVisuals(success, { thumb: config.whitelistThumbUrl });
+
+        await interaction.editReply({ embeds: [success] });
 
         await sendLog({
           embeds: [
             new EmbedBuilder()
-              .setColor(config.embedColor)
+              .setColor(0x2ECC71)
               .setTitle('✅ Whitelist automática')
               .addFields(
                 { name: 'Player', value: `${interaction.user} (${interaction.user.id})` },
@@ -858,12 +874,19 @@ client.on('interactionCreate', async interaction => {
   } catch (error) {
     console.error('[INTERACTION]', error);
 
-    const message = `❌ ${error.message || 'Ocorreu um erro inesperado.'}`;
+    let message = `❌ ${error.message || 'Ocorreu um erro inesperado.'}`;
+
+    if (/ECONN|ETIMEDOUT|MySQL|banco/i.test(String(error.message || ''))) {
+      message = '❌ O banco de dados da cidade está indisponível no momento. O bot continua online, mas a liberação de ID precisa da conexão MySQL.';
+    }
 
     if (interaction.deferred || interaction.replied) {
       await interaction.editReply({ content: message, embeds: [], components: [] }).catch(() => {});
     } else {
-      await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
+      await interaction.reply({
+        content: message,
+        flags: MessageFlags.Ephemeral,
+      }).catch(() => {});
     }
   }
 });
