@@ -124416,6 +124416,7 @@ async function resolveWhitelistSchema(conn) {
   const candidates = [
     { table: w.table, idColumn: w.idColumn, statusColumn: w.statusColumn },
     { table: 'vrp_users', idColumn: 'id', statusColumn: 'whitelisted' },
+    { table: 'accounts', idColumn: 'id', statusColumn: 'Whitelist' },
     { table: 'accounts', idColumn: 'id', statusColumn: 'whitelist' },
     { table: 'accounts', idColumn: 'id', statusColumn: 'whitelisted' },
   ];
@@ -124433,7 +124434,7 @@ async function resolveWhitelistSchema(conn) {
   }
 
   throw new Error(
-    `Não achei a tabela de whitelist. Testei ${w.table}.${w.statusColumn}, vrp_users.whitelisted e accounts.whitelist.`
+    `Não achei a tabela de whitelist. Testei ${w.table}.${w.statusColumn}, vrp_users.whitelisted e accounts.Whitelist.`
   );
 }
 
@@ -124475,9 +124476,7 @@ async function initDb() {
       activeSchema = await resolveWhitelistSchema(conn);
       await ensureClaimsTable(conn);
       dbReady = true;
-      console.log(
-        `[DB] MySQL conectado. Whitelist: ${activeSchema.table}.${activeSchema.statusColumn}`
-      );
+      console.log(`[DB] MySQL conectado. Whitelist: ${activeSchema.table}.${activeSchema.statusColumn}`);
       return true;
     } finally {
       conn.release();
@@ -124508,7 +124507,68 @@ function normalizeDiscord(value) {
     .replace(/^discord:/i, '');
 }
 
-async function verifyIdOwner(conn, discordId, fivemId) {
+function isAccountsSchema() {
+  return String(activeSchema?.table || '').toLowerCase() === 'accounts';
+}
+
+async function resolveWhitelistTarget(conn, cityId, forUpdate = false) {
+  const schema = activeSchema;
+  const table = qi(schema.table);
+  const idCol = qi(schema.idColumn);
+  const statusCol = qi(schema.statusColumn);
+  const lock = forUpdate ? ' FOR UPDATE' : '';
+
+  // Creative/Washer: o ID mostrado no jogo vem de characters.id.
+  // A whitelist fica em accounts e as duas tabelas são ligadas por License.
+  if (isAccountsSchema() && await tableHasColumns(conn, 'characters', ['id', 'License'])) {
+    const [characters] = await conn.execute(
+      `SELECT id AS city_id, License AS license
+       FROM ${qi('characters')}
+       WHERE id = ?
+       LIMIT 1${lock}`,
+      [cityId]
+    );
+
+    if (!characters.length) return null;
+
+    const license = characters[0].license;
+    const [accounts] = await conn.execute(
+      `SELECT ${idCol} AS database_id, ${statusCol} AS current_status
+       FROM ${table}
+       WHERE ${qi('License')} = ?
+       LIMIT 1${lock}`,
+      [license]
+    );
+
+    if (!accounts.length) return null;
+
+    return {
+      cityId: String(cityId),
+      databaseId: accounts[0].database_id,
+      currentStatus: accounts[0].current_status,
+      license,
+    };
+  }
+
+  const [users] = await conn.execute(
+    `SELECT ${idCol} AS database_id, ${statusCol} AS current_status
+     FROM ${table}
+     WHERE ${idCol} = ?
+     LIMIT 1${lock}`,
+    [cityId]
+  );
+
+  if (!users.length) return null;
+
+  return {
+    cityId: String(cityId),
+    databaseId: users[0].database_id,
+    currentStatus: users[0].current_status,
+    license: null,
+  };
+}
+
+async function verifyIdOwner(conn, discordId, cityId, databaseId) {
   const w = config.whitelist;
 
   if (w.verifyMode === 'none') return true;
@@ -124535,7 +124595,7 @@ async function verifyIdOwner(conn, discordId, fivemId) {
        FROM ${table}
        WHERE ${userCol} = ? AND ${identCol} = ?
        LIMIT 1`,
-      [fivemId, wanted]
+      [cityId, wanted]
     );
 
     return rows.length > 0;
@@ -124557,7 +124617,7 @@ async function verifyIdOwner(conn, discordId, fivemId) {
      FROM ${table}
      WHERE ${idCol} = ?
      LIMIT 1`,
-    [fivemId]
+    [databaseId]
   );
 
   if (!rows.length) return false;
@@ -124608,27 +124668,20 @@ async function claimWhitelist({ discordId, fivemId, rpName, releasedBy }) {
       }
     }
 
-    const [users] = await conn.execute(
-      `SELECT ${idCol} AS player_id, ${statusCol} AS current_status
-       FROM ${table}
-       WHERE ${idCol} = ?
-       LIMIT 1
-       FOR UPDATE`,
-      [idText]
-    );
+    const target = await resolveWhitelistTarget(conn, idText, true);
 
-    if (!users.length) {
+    if (!target) {
       throw new Error('Esse ID não existe no banco da cidade. Entre na cidade uma vez e tente novamente.');
     }
 
-    const ownerOk = await verifyIdOwner(conn, discordId, idText);
+    const ownerOk = await verifyIdOwner(conn, discordId, idText, target.databaseId);
     if (!ownerOk) {
       throw new Error('Esse ID não pertence ao seu Discord.');
     }
 
     await conn.execute(
       `UPDATE ${table} SET ${statusCol} = ? WHERE ${idCol} = ? LIMIT 1`,
-      [config.whitelist.statusValue, idText]
+      [config.whitelist.statusValue, target.databaseId]
     );
 
     if (claimsAvailable) {
@@ -124644,7 +124697,7 @@ async function claimWhitelist({ discordId, fivemId, rpName, releasedBy }) {
     return {
       id: idText,
       name: cleanName,
-      previousStatus: users[0].current_status,
+      previousStatus: target.currentStatus,
       releasedBy,
     };
   } catch (error) {
@@ -124704,10 +124757,13 @@ async function unlinkWhitelist(discordId, revertWhitelist = false) {
     const claim = rows[0];
 
     if (revertWhitelist) {
-      await conn.execute(
-        `UPDATE ${table} SET ${statusCol} = 0 WHERE ${idCol} = ? LIMIT 1`,
-        [claim.fivem_id]
-      );
+      const target = await resolveWhitelistTarget(conn, String(claim.fivem_id), true);
+      if (target) {
+        await conn.execute(
+          `UPDATE ${table} SET ${statusCol} = 0 WHERE ${idCol} = ? LIMIT 1`,
+          [target.databaseId]
+        );
+      }
     }
 
     await conn.execute(
