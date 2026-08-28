@@ -124369,7 +124369,7 @@ module.exports = config;
 
 /***/ }),
 
-/***/ 62571:
+/***/ 5204:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 const mysql = __nccwpck_require__(77158);
@@ -124378,11 +124378,6 @@ const config = __nccwpck_require__(1727);
 let pool = null;
 let dbReady = false;
 let claimsAvailable = false;
-let activeSchema = null;
-
-function qi(value) {
-  return `\`${value}\``;
-}
 
 function createPool() {
   return mysql.createPool({
@@ -124401,49 +124396,10 @@ function createPool() {
   });
 }
 
-async function tableHasColumns(conn, table, columns) {
-  try {
-    const [rows] = await conn.query(`SHOW COLUMNS FROM ${qi(table)}`);
-    const found = new Set(rows.map(row => String(row.Field).toLowerCase()));
-    return columns.every(col => found.has(String(col).toLowerCase()));
-  } catch {
-    return false;
-  }
-}
-
-async function resolveWhitelistSchema(conn) {
-  const w = config.whitelist;
-  const candidates = [
-    { table: w.table, idColumn: w.idColumn, statusColumn: w.statusColumn },
-    { table: 'vrp_users', idColumn: 'id', statusColumn: 'whitelisted' },
-    { table: 'accounts', idColumn: 'id', statusColumn: 'Whitelist' },
-    { table: 'accounts', idColumn: 'id', statusColumn: 'whitelist' },
-    { table: 'accounts', idColumn: 'id', statusColumn: 'whitelisted' },
-  ];
-
-  const seen = new Set();
-
-  for (const candidate of candidates) {
-    const key = `${candidate.table}:${candidate.idColumn}:${candidate.statusColumn}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-
-    if (await tableHasColumns(conn, candidate.table, [candidate.idColumn, candidate.statusColumn])) {
-      return candidate;
-    }
-  }
-
-  throw new Error(
-    `Não achei a tabela de whitelist. Testei ${w.table}.${w.statusColumn}, vrp_users.whitelisted e accounts.Whitelist.`
-  );
-}
-
 async function ensureClaimsTable(conn) {
-  const claims = qi(config.whitelist.claimsTable);
-
   try {
     await conn.query(`
-      CREATE TABLE IF NOT EXISTS ${claims} (
+      CREATE TABLE IF NOT EXISTS washer_bot_whitelist_claims (
         discord_id VARCHAR(32) NOT NULL,
         fivem_id BIGINT NOT NULL,
         rp_name VARCHAR(100) NOT NULL,
@@ -124456,7 +124412,7 @@ async function ensureClaimsTable(conn) {
     claimsAvailable = true;
   } catch (error) {
     claimsAvailable = false;
-    console.warn('[DB] Tabela de vínculos não pôde ser criada; whitelist continuará funcionando:', error.message);
+    console.warn('[DB] Tabela de vinculos indisponivel:', error.message);
   }
 }
 
@@ -124469,159 +124425,39 @@ async function initDb() {
 
   if (!pool) pool = createPool();
 
+  const conn = await pool.getConnection();
   try {
-    const conn = await pool.getConnection();
-    try {
-      await conn.query('SELECT 1');
-      activeSchema = await resolveWhitelistSchema(conn);
-      await ensureClaimsTable(conn);
-      dbReady = true;
-      console.log(`[DB] MySQL conectado. Whitelist: ${activeSchema.table}.${activeSchema.statusColumn}`);
-      return true;
-    } finally {
-      conn.release();
-    }
-  } catch (error) {
-    dbReady = false;
-    throw error;
+    await conn.query('SELECT 1');
+    await ensureClaimsTable(conn);
+    dbReady = true;
+    console.log('[DB] MySQL conectado. Whitelist: accounts.Whitelist via characters.License');
+    return true;
+  } finally {
+    conn.release();
   }
 }
 
 async function ensureDb() {
-  if (!config.dbEnabled) {
-    throw new Error('A whitelist está desativada.');
-  }
-
+  if (!config.dbEnabled) throw new Error('A whitelist esta desativada.');
   if (!dbReady) {
     try {
       await initDb();
     } catch {
-      throw new Error('Banco de dados indisponível. Verifique host, porta, usuário e senha do MySQL.');
+      throw new Error('Banco de dados indisponivel. Verifique host, porta, usuario e senha do MySQL.');
     }
   }
 }
 
-function normalizeDiscord(value) {
-  return String(value ?? '')
-    .trim()
-    .replace(/^discord:/i, '');
-}
-
-function isAccountsSchema() {
-  return String(activeSchema?.table || '').toLowerCase() === 'accounts';
-}
-
-async function resolveWhitelistTarget(conn, cityId, forUpdate = false) {
-  const schema = activeSchema;
-  const table = qi(schema.table);
-  const idCol = qi(schema.idColumn);
-  const statusCol = qi(schema.statusColumn);
-  const lock = forUpdate ? ' FOR UPDATE' : '';
-
-  // Creative/Washer: o ID mostrado no jogo vem de characters.id.
-  // A whitelist fica em accounts e as duas tabelas são ligadas por License.
-  if (isAccountsSchema() && await tableHasColumns(conn, 'characters', ['id', 'License'])) {
-    const [characters] = await conn.execute(
-      `SELECT id AS city_id, License AS license
-       FROM ${qi('characters')}
-       WHERE id = ?
-       LIMIT 1${lock}`,
-      [cityId]
-    );
-
-    if (!characters.length) return null;
-
-    const license = characters[0].license;
-    const [accounts] = await conn.execute(
-      `SELECT ${idCol} AS database_id, ${statusCol} AS current_status
-       FROM ${table}
-       WHERE ${qi('License')} = ?
-       LIMIT 1${lock}`,
-      [license]
-    );
-
-    if (!accounts.length) return null;
-
-    return {
-      cityId: String(cityId),
-      databaseId: accounts[0].database_id,
-      currentStatus: accounts[0].current_status,
-      license,
-    };
-  }
-
-  const [users] = await conn.execute(
-    `SELECT ${idCol} AS database_id, ${statusCol} AS current_status
-     FROM ${table}
-     WHERE ${idCol} = ?
-     LIMIT 1${lock}`,
+async function getCharacterById(conn, cityId, lock = false) {
+  const suffix = lock ? ' FOR UPDATE' : '';
+  const [rows] = await conn.execute(
+    `SELECT id, License, Name, Lastname
+     FROM characters
+     WHERE id = ? AND (Deleted = 0 OR Deleted IS NULL)
+     LIMIT 1${suffix}`,
     [cityId]
   );
-
-  if (!users.length) return null;
-
-  return {
-    cityId: String(cityId),
-    databaseId: users[0].database_id,
-    currentStatus: users[0].current_status,
-    license: null,
-  };
-}
-
-async function verifyIdOwner(conn, discordId, cityId, databaseId) {
-  const w = config.whitelist;
-
-  if (w.verifyMode === 'none') return true;
-
-  if (w.verifyMode === 'identifier_table') {
-    const exists = await tableHasColumns(
-      conn,
-      w.identifierTable,
-      [w.identifierUserIdColumn, w.identifierColumn]
-    );
-
-    if (!exists) {
-      console.warn('[DB] Tabela de identificadores não encontrada; validação por Discord ignorada.');
-      return true;
-    }
-
-    const table = qi(w.identifierTable);
-    const userCol = qi(w.identifierUserIdColumn);
-    const identCol = qi(w.identifierColumn);
-    const wanted = `${w.discordPrefix}${discordId}`;
-
-    const [rows] = await conn.execute(
-      `SELECT ${userCol} AS user_id
-       FROM ${table}
-       WHERE ${userCol} = ? AND ${identCol} = ?
-       LIMIT 1`,
-      [cityId, wanted]
-    );
-
-    return rows.length > 0;
-  }
-
-  const schema = activeSchema;
-  const table = qi(schema.table);
-  const idCol = qi(schema.idColumn);
-  const discordCol = qi(w.discordColumn);
-
-  const hasDiscord = await tableHasColumns(conn, schema.table, [w.discordColumn]);
-  if (!hasDiscord) {
-    console.warn('[DB] Coluna Discord não encontrada; validação por Discord ignorada.');
-    return true;
-  }
-
-  const [rows] = await conn.execute(
-    `SELECT ${discordCol} AS discord_value
-     FROM ${table}
-     WHERE ${idCol} = ?
-     LIMIT 1`,
-    [databaseId]
-  );
-
-  if (!rows.length) return false;
-  return normalizeDiscord(rows[0].discord_value) === String(discordId);
+  return rows[0] || null;
 }
 
 async function claimWhitelist({ discordId, fivemId, rpName, releasedBy }) {
@@ -124629,67 +124465,85 @@ async function claimWhitelist({ discordId, fivemId, rpName, releasedBy }) {
 
   const idText = String(fivemId).trim();
   if (!/^\d{1,12}$/.test(idText)) {
-    throw new Error('ID inválido. Digite apenas números.');
+    throw new Error('ID invalido. Digite apenas numeros.');
   }
 
   const cleanName = String(rpName || '').trim().replace(/\s+/g, ' ');
   if (cleanName.length < 2 || cleanName.length > 60) {
-    throw new Error('Nome inválido. Use entre 2 e 60 caracteres.');
+    throw new Error('Nome invalido. Use entre 2 e 60 caracteres.');
   }
 
-  const schema = activeSchema;
-  const table = qi(schema.table);
-  const idCol = qi(schema.idColumn);
-  const statusCol = qi(schema.statusColumn);
-  const claims = qi(config.whitelist.claimsTable);
-
   const conn = await pool.getConnection();
-
   try {
     await conn.beginTransaction();
 
+    const character = await getCharacterById(conn, idText, true);
+    if (!character?.License) {
+      throw new Error('Esse ID nao existe no banco da cidade. Entre na cidade uma vez e tente novamente.');
+    }
+
+    const [accounts] = await conn.execute(
+      `SELECT id, Whitelist
+       FROM accounts
+       WHERE License = ?
+       FOR UPDATE`,
+      [character.License]
+    );
+
+    if (!accounts.length) {
+      throw new Error('A conta desse ID nao foi encontrada na tabela accounts.');
+    }
+
+    let existingDiscord = null;
+    let existingId = null;
+
     if (claimsAvailable) {
       const [byDiscord] = await conn.execute(
-        `SELECT fivem_id FROM ${claims} WHERE discord_id = ? LIMIT 1 FOR UPDATE`,
+        `SELECT discord_id, fivem_id FROM washer_bot_whitelist_claims
+         WHERE discord_id = ? LIMIT 1 FOR UPDATE`,
         [discordId]
       );
+      existingDiscord = byDiscord[0] || null;
 
-      if (byDiscord.length) {
-        throw new Error(`Seu Discord já está vinculado ao ID ${byDiscord[0].fivem_id}.`);
+      if (existingDiscord && String(existingDiscord.fivem_id) !== idText) {
+        throw new Error(`Seu Discord ja esta vinculado ao ID ${existingDiscord.fivem_id}. Use /desvincularid primeiro.`);
       }
 
       const [byId] = await conn.execute(
-        `SELECT discord_id FROM ${claims} WHERE fivem_id = ? LIMIT 1 FOR UPDATE`,
+        `SELECT discord_id, fivem_id FROM washer_bot_whitelist_claims
+         WHERE fivem_id = ? LIMIT 1 FOR UPDATE`,
         [idText]
       );
+      existingId = byId[0] || null;
 
-      if (byId.length) {
-        throw new Error('Esse ID já foi liberado por outra conta do Discord.');
+      if (existingId && String(existingId.discord_id) !== String(discordId)) {
+        throw new Error('Esse ID ja foi liberado por outra conta do Discord.');
       }
     }
 
-    const target = await resolveWhitelistTarget(conn, idText, true);
-
-    if (!target) {
-      throw new Error('Esse ID não existe no banco da cidade. Entre na cidade uma vez e tente novamente.');
-    }
-
-    const ownerOk = await verifyIdOwner(conn, discordId, idText, target.databaseId);
-    if (!ownerOk) {
-      throw new Error('Esse ID não pertence ao seu Discord.');
-    }
-
+    // IMPORTANTE: atualiza TODAS as linhas de accounts com a mesma License.
+    // Isso evita uma linha antiga/duplicada continuar com Whitelist = 0.
     await conn.execute(
-      `UPDATE ${table} SET ${statusCol} = ? WHERE ${idCol} = ? LIMIT 1`,
-      [config.whitelist.statusValue, target.databaseId]
+      `UPDATE accounts SET Whitelist = 1 WHERE License = ?`,
+      [character.License]
     );
 
     if (claimsAvailable) {
-      await conn.execute(
-        `INSERT INTO ${claims} (discord_id, fivem_id, rp_name, released_by)
-         VALUES (?, ?, ?, ?)`,
-        [discordId, idText, cleanName, releasedBy]
-      );
+      if (!existingDiscord && !existingId) {
+        await conn.execute(
+          `INSERT INTO washer_bot_whitelist_claims
+           (discord_id, fivem_id, rp_name, released_by)
+           VALUES (?, ?, ?, ?)`,
+          [discordId, idText, cleanName, releasedBy]
+        );
+      } else {
+        await conn.execute(
+          `UPDATE washer_bot_whitelist_claims
+           SET rp_name = ?, released_by = ?
+           WHERE discord_id = ? AND fivem_id = ?`,
+          [cleanName, releasedBy, discordId, idText]
+        );
+      }
     }
 
     await conn.commit();
@@ -124697,7 +124551,7 @@ async function claimWhitelist({ discordId, fivemId, rpName, releasedBy }) {
     return {
       id: idText,
       name: cleanName,
-      previousStatus: target.currentStatus,
+      previousStatus: accounts.some(a => Number(a.Whitelist) === 1) ? 1 : 0,
       releasedBy,
     };
   } catch (error) {
@@ -124712,12 +124566,10 @@ async function getClaimByDiscord(discordId) {
   await ensureDb();
   if (!claimsAvailable) return null;
 
-  const claims = qi(config.whitelist.claimsTable);
   const [rows] = await pool.execute(
     `SELECT discord_id, fivem_id, rp_name, released_by, created_at
-     FROM ${claims}
-     WHERE discord_id = ?
-     LIMIT 1`,
+     FROM washer_bot_whitelist_claims
+     WHERE discord_id = ? LIMIT 1`,
     [discordId]
   );
   return rows[0] || null;
@@ -124725,49 +124577,39 @@ async function getClaimByDiscord(discordId) {
 
 async function unlinkWhitelist(discordId, revertWhitelist = false) {
   await ensureDb();
-
   if (!claimsAvailable) {
-    throw new Error('A tabela de vínculos não está disponível para desvincular automaticamente.');
+    throw new Error('A tabela de vinculos nao esta disponivel.');
   }
 
-  const claims = qi(config.whitelist.claimsTable);
-  const schema = activeSchema;
-  const table = qi(schema.table);
-  const idCol = qi(schema.idColumn);
-  const statusCol = qi(schema.statusColumn);
-
   const conn = await pool.getConnection();
-
   try {
     await conn.beginTransaction();
 
     const [rows] = await conn.execute(
       `SELECT discord_id, fivem_id, rp_name, released_by
-       FROM ${claims}
-       WHERE discord_id = ?
-       LIMIT 1
-       FOR UPDATE`,
+       FROM washer_bot_whitelist_claims
+       WHERE discord_id = ? LIMIT 1 FOR UPDATE`,
       [discordId]
     );
 
     if (!rows.length) {
-      throw new Error('Esse usuário não possui ID vinculado pelo bot.');
+      throw new Error('Esse usuario nao possui ID vinculado pelo bot.');
     }
 
     const claim = rows[0];
 
     if (revertWhitelist) {
-      const target = await resolveWhitelistTarget(conn, String(claim.fivem_id), true);
-      if (target) {
+      const character = await getCharacterById(conn, String(claim.fivem_id), true);
+      if (character?.License) {
         await conn.execute(
-          `UPDATE ${table} SET ${statusCol} = 0 WHERE ${idCol} = ? LIMIT 1`,
-          [target.databaseId]
+          `UPDATE accounts SET Whitelist = 0 WHERE License = ?`,
+          [character.License]
         );
       }
     }
 
     await conn.execute(
-      `DELETE FROM ${claims} WHERE discord_id = ? LIMIT 1`,
+      `DELETE FROM washer_bot_whitelist_claims WHERE discord_id = ? LIMIT 1`,
       [discordId]
     );
 
@@ -124787,6 +124629,14 @@ module.exports = {
   getClaimByDiscord,
   unlinkWhitelist,
 };
+
+
+/***/ }),
+
+/***/ 62571:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+module.exports = __nccwpck_require__(5204);
 
 
 /***/ }),
